@@ -2,10 +2,11 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { StatusBar } from 'expo-status-bar';
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
 import {
   ActivityIndicator,
   BackHandler,
+  FlatList,
   Image,
   ImageBackground,
   Modal,
@@ -13,9 +14,11 @@ import {
   RefreshControl,
   ScrollView,
   StyleSheet,
+  type StyleProp,
   Text,
   TextInput,
   View,
+  type ViewStyle,
 } from 'react-native';
 import {
   SafeAreaProvider,
@@ -292,23 +295,41 @@ function Featured({ movie, onPlay, onDetails }: { movie: Movie | null; onPlay: (
   );
 }
 
-function CatalogGrid({ movies, onPress }: { movies: Movie[]; onPress: (movie: Movie) => void }) {
-  const rows: Movie[][] = [];
-  for (let i = 0; i < movies.length; i += 2) rows.push(movies.slice(i, i + 2));
+function CatalogList({
+  movies,
+  onPress,
+  contentContainerStyle,
+  emptyComponent,
+}: {
+  movies: Movie[];
+  onPress: (movie: Movie) => void;
+  contentContainerStyle: StyleProp<ViewStyle>;
+  emptyComponent?: ReactElement | null;
+}) {
+  const renderItem = useCallback(({ item }: { item: Movie }) => (
+    <View style={styles.catalogCell}>
+      <PosterCard movie={item} onPress={onPress} />
+    </View>
+  ), [onPress]);
 
   return (
-    <View style={styles.catalogGrid}>
-      {rows.map((row, rowIndex) => (
-        <View key={rowIndex} style={styles.catalogRow}>
-          {row.map((movie) => (
-            <View key={movie.id} style={styles.catalogCell}>
-              <PosterCard movie={movie} onPress={onPress} />
-            </View>
-          ))}
-          {row.length === 1 && <View style={styles.catalogCell} />}
-        </View>
-      ))}
-    </View>
+    <FlatList
+      data={movies}
+      renderItem={renderItem}
+      keyExtractor={(movie, index) => `${movie.media_type || (movie.first_air_date ? 'tv' : 'movie')}-${movie.id}-${index}`}
+      numColumns={2}
+      columnWrapperStyle={styles.catalogRow}
+      style={styles.screenFill}
+      contentContainerStyle={contentContainerStyle}
+      ListEmptyComponent={emptyComponent}
+      keyboardShouldPersistTaps="handled"
+      initialNumToRender={8}
+      maxToRenderPerBatch={8}
+      updateCellsBatchingPeriod={50}
+      windowSize={7}
+      removeClippedSubviews
+      showsVerticalScrollIndicator={false}
+    />
   );
 }
 
@@ -372,15 +393,11 @@ function SearchScreen({
           </Pressable>
         ) : null}
       </View>
-      <ScrollView
-        style={styles.screenFill}
+      <CatalogList
+        movies={query && results.length ? results : []}
+        onPress={onPress}
         contentContainerStyle={styles.searchResultsContent}
-        keyboardShouldPersistTaps="handled"
-        showsVerticalScrollIndicator={false}
-      >
-        {query && results.length ? (
-          <CatalogGrid movies={results} onPress={onPress} />
-        ) : (
+        emptyComponent={(
           <View style={styles.emptyState}>
             <View style={styles.emptyIcon}><Icon name={query ? 'film-outline' : 'search-outline'} size={30} color={COLORS.cyan} /></View>
             <Text style={styles.sectionKicker}>{query ? 'No matches yet' : 'Open the catalog'}</Text>
@@ -388,7 +405,7 @@ function SearchScreen({
             <Text style={styles.emptyCopy}>{query ? 'Try another title, spelling, or platform.' : 'Search by title, series, or platform and we’ll bring the screening room to you.'}</Text>
           </View>
         )}
-      </ScrollView>
+      />
     </View>
   );
 }
@@ -542,6 +559,21 @@ function GenreScreen({
   onRetry: () => void;
   onPress: (movie: Movie) => void;
 }) {
+  const emptyComponent = loading ? (
+    <ActivityIndicator color={COLORS.lime} style={styles.loadingIndicator} />
+  ) : error ? (
+    <View style={styles.genreErrorState}>
+      <Text style={styles.emptyTitle}>The signal dropped.</Text>
+      <Text style={styles.emptyCopy}>{error}</Text>
+      <ActionButton label="Try again" icon="refresh" onPress={onRetry} />
+    </View>
+  ) : (
+    <View style={styles.genreErrorState}>
+      <Text style={styles.emptyTitle}>No titles found.</Text>
+      <Text style={styles.emptyCopy}>There are no titles in this genre right now.</Text>
+    </View>
+  );
+
   return (
     <View style={styles.screenFill}>
       <ScreenHeading
@@ -550,23 +582,12 @@ function GenreScreen({
         detail="A focused shelf for this signal."
         onBack={onBack}
       />
-      <ScrollView style={styles.screenFill} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>
-        {loading ? <ActivityIndicator color={COLORS.lime} style={styles.loadingIndicator} /> : null}
-        {!loading && error ? (
-          <View style={styles.genreErrorState}>
-            <Text style={styles.emptyTitle}>The signal dropped.</Text>
-            <Text style={styles.emptyCopy}>{error}</Text>
-            <ActionButton label="Try again" icon="refresh" onPress={onRetry} />
-          </View>
-        ) : null}
-        {!loading && !error && movies.length ? <CatalogGrid movies={movies} onPress={onPress} /> : null}
-        {!loading && !error && !movies.length ? (
-          <View style={styles.genreErrorState}>
-            <Text style={styles.emptyTitle}>No titles found.</Text>
-            <Text style={styles.emptyCopy}>There are no titles in this genre right now.</Text>
-          </View>
-        ) : null}
-      </ScrollView>
+      <CatalogList
+        movies={movies}
+        onPress={onPress}
+        contentContainerStyle={styles.catalogContent}
+        emptyComponent={emptyComponent}
+      />
     </View>
   );
 }
@@ -1086,9 +1107,11 @@ function CinemaApp() {
         title={kind === 'films' ? 'Films' : 'Series'}
         detail={kind === 'films' ? 'A full-screen collection for the night.' : 'Stories with room to stay awhile.'}
       />
-      <ScrollView style={styles.screenFill} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>
-        <CatalogGrid movies={kind === 'films' ? filmCatalog : seriesCatalog} onPress={openMovie} />
-      </ScrollView>
+      <CatalogList
+        movies={kind === 'films' ? filmCatalog : seriesCatalog}
+        onPress={openMovie}
+        contentContainerStyle={styles.catalogContent}
+      />
     </View>
   );
 
@@ -1267,7 +1290,6 @@ const styles = StyleSheet.create({
   screenBackText: { color: COLORS.cyan, fontSize: 11, fontWeight: '800' },
   screenTitle: { color: COLORS.paper, fontSize: 40, lineHeight: 41, fontWeight: '900', letterSpacing: -2, marginTop: 9 },
   screenDetail: { color: COLORS.muted, fontSize: 14, lineHeight: 20, marginTop: 10 },
-  catalogGrid: { gap: 18 },
   catalogRow: { flexDirection: 'row', gap: 12 },
   catalogCell: { flex: 1 },
   searchField: { minHeight: 56, paddingHorizontal: 14, borderRadius: 15, borderWidth: 1, borderColor: 'rgba(83,229,255,0.45)', backgroundColor: 'rgba(5,8,17,0.84)', flexDirection: 'row', alignItems: 'center', gap: 10, marginBottom: 24 },
