@@ -490,6 +490,7 @@ function MovieSheet({
   const [details, setDetails] = useState<Movie | null>(null);
   const [detailsLoading, setDetailsLoading] = useState(false);
   const [posterFailed, setPosterFailed] = useState(false);
+  const insets = useSafeAreaInsets();
 
   const mediaType = movie && isSeries(movie) ? 'tv' : 'movie';
 
@@ -531,7 +532,7 @@ function MovieSheet({
     <Modal visible={Boolean(movie)} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.modalRoot}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close details" />
-        <View style={styles.movieSheet}>
+        <View style={[styles.movieSheet, { paddingBottom: 20 + insets.bottom }]}>
           <View style={styles.sheetHandle} />
           {activeMovie?.backdrop_path && (
             <Image source={{ uri: `${BACKDROP_URL}${activeMovie.backdrop_path}` }} style={styles.sheetBackdrop} />
@@ -632,7 +633,6 @@ function GenreScreen({
 }
 
 function BottomNav({ activeTab, onChange }: { activeTab: Tab; onChange: (tab: Tab) => void }) {
-  const insets = useSafeAreaInsets();
   const tabs: { key: Tab; label: string; icon: string }[] = [
     { key: 'home', label: 'Home', icon: 'home' },
     { key: 'films', label: 'Films', icon: 'film' },
@@ -642,7 +642,7 @@ function BottomNav({ activeTab, onChange }: { activeTab: Tab; onChange: (tab: Ta
   ];
 
   return (
-    <View style={[styles.bottomNav, { paddingBottom: Math.max(insets.bottom, 7) }]}>
+    <View style={styles.bottomNav}>
       {tabs.map((tab) => {
         const selected = activeTab === tab.key;
         return (
@@ -1190,7 +1190,7 @@ function CinemaApp() {
   );
 
   return (
-    <SafeAreaView style={styles.safe} edges={playerMovie ? ['top', 'bottom'] : ['top']}>
+    <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <StatusBar style="light" />
       {playerMovie ? (
         <NativePlayerScreen movie={playerMovie} onClose={() => setPlayerMovie(null)} />
@@ -1348,7 +1348,7 @@ const styles = StyleSheet.create({
   genreChipPressed: { borderColor: COLORS.lime, backgroundColor: 'rgba(215,255,97,0.12)' },
   genreChipText: { color: COLORS.paper, fontSize: 15, fontWeight: '800' },
   loadingIndicator: { marginTop: 45 },
-  bottomNav: { minHeight: 64, marginHorizontal: 10, marginTop: 8, borderRadius: 21, paddingTop: 6, paddingHorizontal: 6, flexDirection: 'row', backgroundColor: 'rgba(10,14,27,0.94)', borderWidth: 1, borderColor: COLORS.line, shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 25, elevation: 14 },
+  bottomNav: { minHeight: 64, marginHorizontal: 10, marginTop: 8, paddingTop: 6, paddingBottom: 7, paddingHorizontal: 6, borderRadius: 21, flexDirection: 'row', backgroundColor: 'rgba(10,14,27,0.94)', borderWidth: 1, borderColor: COLORS.line, shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 25, elevation: 14 },
   bottomTab: { flex: 1, minHeight: 48, borderRadius: 15, alignItems: 'center', justifyContent: 'center', gap: 3 },
   bottomTabActive: { backgroundColor: COLORS.lime },
   bottomTabText: { color: COLORS.muted, fontSize: 10, fontWeight: '800' },
