@@ -5,9 +5,9 @@ import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
 import {
   ActivityIndicator,
+  BackHandler,
   Image,
   ImageBackground,
-  Linking,
   Modal,
   Pressable,
   RefreshControl,
@@ -35,6 +35,14 @@ type Movie = {
   number_of_seasons?: number;
   vote_average?: number;
   media_type?: string;
+  genre_ids?: number[];
+  genres?: { id: number; name: string }[];
+  tagline?: string;
+  runtime?: number;
+  episode_run_time?: number[];
+  original_language?: string;
+  status?: string;
+  production_companies?: { id: number; name: string }[];
 };
 
 type PlaybackSource = {
@@ -62,7 +70,7 @@ type Collections = {
   anime: Movie[];
 };
 
-type Tab = 'home' | 'films' | 'series' | 'search' | 'browse';
+type Tab = 'home' | 'films' | 'series' | 'search' | 'browse' | 'genre';
 
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || 'https://sage-cinema-nu.vercel.app').replace(/\/$/, '');
 const POSTER_URL = 'https://image.tmdb.org/t/p/w500';
@@ -304,9 +312,25 @@ function CatalogGrid({ movies, onPress }: { movies: Movie[]; onPress: (movie: Mo
   );
 }
 
-function ScreenHeading({ eyebrow, title, detail }: { eyebrow: string; title: string; detail: string }) {
+function ScreenHeading({
+  eyebrow,
+  title,
+  detail,
+  onBack,
+}: {
+  eyebrow: string;
+  title: string;
+  detail: string;
+  onBack?: () => void;
+}) {
   return (
     <View style={styles.screenHeading}>
+      {onBack ? (
+        <Pressable onPress={onBack} style={({ pressed }) => [styles.screenBack, pressed && styles.pressed]}>
+          <Icon name="arrow-back" size={16} color={COLORS.cyan} />
+          <Text style={styles.screenBackText}>Browse all genres</Text>
+        </Pressable>
+      ) : null}
       <Text style={styles.sectionKicker}>{eyebrow}</Text>
       <Text style={styles.screenTitle}>{title}</Text>
       <Text style={styles.screenDetail}>{detail}</Text>
@@ -394,39 +418,156 @@ function BrowseScreen({ genres, onGenre }: { genres: Record<number, string>; onG
   );
 }
 
-function MovieSheet({ movie, onClose, onPlay }: { movie: Movie | null; onClose: () => void; onPlay: (movie: Movie) => void }) {
+function MovieSheet({
+  movie,
+  genres,
+  onClose,
+  onPlay,
+}: {
+  movie: Movie | null;
+  genres: Record<number, string>;
+  onClose: () => void;
+  onPlay: (movie: Movie) => void;
+}) {
+  const [details, setDetails] = useState<Movie | null>(null);
+  const [detailsLoading, setDetailsLoading] = useState(false);
+  const [posterFailed, setPosterFailed] = useState(false);
+
+  const mediaType = movie && isSeries(movie) ? 'tv' : 'movie';
+
+  useEffect(() => {
+    if (!movie) {
+      setDetails(null);
+      setDetailsLoading(false);
+      return;
+    }
+
+    let active = true;
+    setDetails(movie);
+    setDetailsLoading(true);
+    setPosterFailed(false);
+
+    fetch(`${API_URL}/api/movie/${movie.id}?type=${mediaType}`)
+      .then((response) => {
+        if (!response.ok) throw new Error(`Movie details request failed with status ${response.status}`);
+        return response.json() as Promise<Movie>;
+      })
+      .then((payload) => {
+        if (active && payload && payload.id === movie.id) setDetails({ ...movie, ...payload });
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (active) setDetailsLoading(false);
+      });
+
+    return () => {
+      active = false;
+    };
+  }, [mediaType, movie?.id]);
+
+  const activeMovie = details?.id === movie?.id ? details : movie;
+  const posterPath = activeMovie?.poster_path || activeMovie?.backdrop_path;
+  const genreNames = activeMovie?.genres?.map((genre) => genre.name).slice(0, 3)
+    || activeMovie?.genre_ids?.map((id) => genres[id]).filter(Boolean).slice(0, 3)
+    || [];
+
   return (
     <Modal visible={Boolean(movie)} transparent animationType="slide" onRequestClose={onClose}>
       <View style={styles.modalRoot}>
         <Pressable style={StyleSheet.absoluteFill} onPress={onClose} accessibilityLabel="Close details" />
         <View style={styles.movieSheet}>
           <View style={styles.sheetHandle} />
-          {movie?.backdrop_path && (
-            <Image source={{ uri: `${BACKDROP_URL}${movie.backdrop_path}` }} style={styles.sheetBackdrop} />
+          {activeMovie?.backdrop_path && (
+            <Image source={{ uri: `${BACKDROP_URL}${activeMovie.backdrop_path}` }} style={styles.sheetBackdrop} />
           )}
           <LinearGradient colors={['rgba(17,22,42,0.1)', COLORS.sheet]} style={styles.sheetBackdropGradient} />
           <View style={styles.sheetTopRow}>
             <View style={styles.sheetPosterWrap}>
-              {movie?.poster_path ? <Image source={{ uri: `${POSTER_URL}${movie.poster_path}` }} style={styles.sheetPoster} /> : null}
+              {posterPath && !posterFailed ? (
+                <Image
+                  source={{ uri: `${POSTER_URL}${posterPath}` }}
+                  style={styles.sheetPoster}
+                  resizeMode="cover"
+                  onError={() => setPosterFailed(true)}
+                />
+              ) : (
+                <View style={[styles.sheetPoster, styles.sheetPosterFallback]}>
+                  <Icon name="film-outline" size={28} color={COLORS.muted} />
+                  <Text style={styles.posterFallbackText}>No artwork</Text>
+                </View>
+              )}
             </View>
             <View style={styles.sheetCopy}>
               <Text style={styles.sectionKicker}>Title signal</Text>
-              <Text numberOfLines={3} style={styles.sheetTitle}>{movie ? titleOf(movie) : ''}</Text>
+              <Text numberOfLines={3} style={styles.sheetTitle}>{activeMovie ? titleOf(activeMovie) : ''}</Text>
               <View style={styles.featuredMeta}>
-                <Text style={styles.matchText}>{movie ? rating(movie) : '—'} ★</Text>
-                <Text style={styles.featuredMetaText}>{movie ? yearOf(movie) : '—'}</Text>
-                <Text style={styles.featuredMetaText}>{movie ? typeLabel(movie) : 'Film'}</Text>
+                <Text style={styles.matchText}>{activeMovie ? rating(activeMovie) : '—'} ★</Text>
+                <Text style={styles.featuredMetaText}>{activeMovie ? yearOf(activeMovie) : '—'}</Text>
+                <Text style={styles.featuredMetaText}>{activeMovie ? typeLabel(activeMovie) : 'Film'}</Text>
               </View>
+              {detailsLoading ? <ActivityIndicator color={COLORS.lime} size="small" style={styles.sheetDetailsLoading} /> : null}
             </View>
             <Pressable onPress={onClose} style={styles.sheetClose} accessibilityLabel="Close details">
               <Icon name="close" size={20} />
             </Pressable>
           </View>
-          <Text style={styles.sheetOverview}>{movie?.overview || 'No synopsis is available for this title yet.'}</Text>
-          <ActionButton label="Open player" icon="play" onPress={() => movie && onPlay(movie)} />
+          {activeMovie?.tagline ? <Text style={styles.sheetTagline}>{activeMovie.tagline}</Text> : null}
+          {genreNames.length ? (
+            <View style={styles.sheetGenres}>
+              {genreNames.map((name) => <Text key={name} style={styles.sheetGenre}>{name}</Text>)}
+            </View>
+          ) : null}
+          <Text style={styles.sheetOverview}>{activeMovie?.overview || 'No synopsis is available for this title yet.'}</Text>
+          <ActionButton label="Open player" icon="play" onPress={() => activeMovie && onPlay(activeMovie)} />
         </View>
       </View>
     </Modal>
+  );
+}
+
+function GenreScreen({
+  name,
+  movies,
+  loading,
+  error,
+  onBack,
+  onRetry,
+  onPress,
+}: {
+  name: string;
+  movies: Movie[];
+  loading: boolean;
+  error: string;
+  onBack: () => void;
+  onRetry: () => void;
+  onPress: (movie: Movie) => void;
+}) {
+  return (
+    <View style={styles.screenFill}>
+      <ScreenHeading
+        eyebrow="Native genre collection"
+        title={name}
+        detail="A focused shelf for this signal."
+        onBack={onBack}
+      />
+      <ScrollView style={styles.screenFill} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>
+        {loading ? <ActivityIndicator color={COLORS.lime} style={styles.loadingIndicator} /> : null}
+        {!loading && error ? (
+          <View style={styles.genreErrorState}>
+            <Text style={styles.emptyTitle}>The signal dropped.</Text>
+            <Text style={styles.emptyCopy}>{error}</Text>
+            <ActionButton label="Try again" icon="refresh" onPress={onRetry} />
+          </View>
+        ) : null}
+        {!loading && !error && movies.length ? <CatalogGrid movies={movies} onPress={onPress} /> : null}
+        {!loading && !error && !movies.length ? (
+          <View style={styles.genreErrorState}>
+            <Text style={styles.emptyTitle}>No titles found.</Text>
+            <Text style={styles.emptyCopy}>There are no titles in this genre right now.</Text>
+          </View>
+        ) : null}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -751,6 +892,11 @@ function CinemaApp() {
   const [genres, setGenres] = useState<Record<number, string>>({});
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
+  const [selectedGenreId, setSelectedGenreId] = useState<number | null>(null);
+  const [genreMovies, setGenreMovies] = useState<Movie[]>([]);
+  const [genreLoading, setGenreLoading] = useState(false);
+  const [genreError, setGenreError] = useState('');
+  const [genreReloadKey, setGenreReloadKey] = useState(0);
   const [playerMovie, setPlayerMovie] = useState<Movie | null>(null);
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Movie[]>([]);
@@ -827,6 +973,63 @@ function CinemaApp() {
     };
   }, [activeTab, query]);
 
+  useEffect(() => {
+    if (activeTab !== 'genre' || selectedGenreId === null) return;
+
+    const controller = new AbortController();
+    let active = true;
+    setGenreLoading(true);
+    setGenreError('');
+
+    fetch(`${API_URL}/api/movies/genre/${selectedGenreId}`, { signal: controller.signal })
+      .then((response) => {
+        if (!response.ok) throw new Error(`Genre request failed with status ${response.status}`);
+        return response.json() as Promise<{ results?: Movie[] }>;
+      })
+      .then((payload) => {
+        if (active) setGenreMovies(Array.isArray(payload.results) ? payload.results : []);
+      })
+      .catch((cause) => {
+        if (active && !(cause instanceof DOMException && cause.name === 'AbortError')) {
+          setGenreMovies([]);
+          setGenreError('The genre collection is unavailable right now.');
+        }
+      })
+      .finally(() => {
+        if (active) setGenreLoading(false);
+      });
+
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [activeTab, genreReloadKey, selectedGenreId]);
+
+  useEffect(() => {
+    const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (playerMovie) {
+        setPlayerMovie(null);
+        return true;
+      }
+      if (selectedMovie) {
+        setSelectedMovie(null);
+        return true;
+      }
+      if (activeTab === 'genre') {
+        setSelectedGenreId(null);
+        setActiveTab('browse');
+        return true;
+      }
+      if (activeTab !== 'home') {
+        setActiveTab('home');
+        return true;
+      }
+      return false;
+    });
+
+    return () => subscription.remove();
+  }, [activeTab, playerMovie, selectedMovie]);
+
   const featured = useMemo(() => collections.trending[0] || collections.latest[0] || null, [collections]);
   const filmCatalog = useMemo(() => collections.trending.filter((movie) => !isSeries(movie)), [collections]);
   const seriesCatalog = useMemo(() => collections.tv.filter(isSeries), [collections]);
@@ -837,8 +1040,14 @@ function CinemaApp() {
     setPlayerMovie(movie);
   };
 
-  const onGenre = (id: number) => {
-    void Linking.openURL(`${API_URL}/genre/${id}`);
+  const openGenre = (id: number) => {
+    setSelectedGenreId(id);
+    setActiveTab('genre');
+  };
+
+  const closeGenre = () => {
+    setSelectedGenreId(null);
+    setActiveTab('browse');
   };
 
   const renderHome = () => (
@@ -893,7 +1102,22 @@ function CinemaApp() {
   const renderBrowse = () => (
     <View style={styles.screenFill}>
       <Header onSearch={() => setActiveTab('search')} onBrowse={() => undefined} />
-      <BrowseScreen genres={genres} onGenre={onGenre} />
+      <BrowseScreen genres={genres} onGenre={openGenre} />
+    </View>
+  );
+
+  const renderGenre = () => (
+    <View style={styles.screenFill}>
+      <Header onSearch={() => setActiveTab('search')} onBrowse={() => setActiveTab('browse')} />
+      <GenreScreen
+        name={selectedGenreId === null ? 'Genre' : genres[selectedGenreId] || 'Genre'}
+        movies={genreMovies}
+        loading={genreLoading}
+        error={genreError}
+        onBack={closeGenre}
+        onRetry={() => setGenreReloadKey((value) => value + 1)}
+        onPress={openMovie}
+      />
     </View>
   );
 
@@ -909,9 +1133,9 @@ function CinemaApp() {
           <Text style={styles.loadingTitle}>Tuning the projector</Text>
           <Text style={styles.mutedText}>Loading the living catalog</Text>
         </View>
-      ) : activeTab === 'home' ? renderHome() : activeTab === 'films' ? renderCatalog('films') : activeTab === 'series' ? renderCatalog('series') : activeTab === 'search' ? renderSearch() : renderBrowse()}
-      {!playerMovie && <BottomNav activeTab={activeTab} onChange={setActiveTab} />}
-      {!playerMovie && <MovieSheet movie={selectedMovie} onClose={() => setSelectedMovie(null)} onPlay={playMovie} />}
+      ) : activeTab === 'home' ? renderHome() : activeTab === 'films' ? renderCatalog('films') : activeTab === 'series' ? renderCatalog('series') : activeTab === 'search' ? renderSearch() : activeTab === 'browse' ? renderBrowse() : renderGenre()}
+      {!playerMovie && <BottomNav activeTab={activeTab === 'genre' ? 'browse' : activeTab} onChange={setActiveTab} />}
+      {!playerMovie && <MovieSheet movie={selectedMovie} genres={genres} onClose={() => setSelectedMovie(null)} onPlay={playMovie} />}
     </SafeAreaView>
   );
 }
@@ -1039,6 +1263,8 @@ const styles = StyleSheet.create({
   posterTitle: { color: '#e2e6ff', fontSize: 13, fontWeight: '800', marginTop: 9 },
   posterMeta: { color: COLORS.muted, fontSize: 11, marginTop: 4 },
   screenHeading: { paddingHorizontal: 18, paddingTop: 22, paddingBottom: 23 },
+  screenBack: { alignSelf: 'flex-start', flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 17 },
+  screenBackText: { color: COLORS.cyan, fontSize: 11, fontWeight: '800' },
   screenTitle: { color: COLORS.paper, fontSize: 40, lineHeight: 41, fontWeight: '900', letterSpacing: -2, marginTop: 9 },
   screenDetail: { color: COLORS.muted, fontSize: 14, lineHeight: 20, marginTop: 10 },
   catalogGrid: { gap: 18 },
@@ -1071,8 +1297,14 @@ const styles = StyleSheet.create({
   sheetTopRow: { flexDirection: 'row', gap: 14, alignItems: 'flex-start' },
   sheetPosterWrap: { width: 86, height: 128 },
   sheetPoster: { width: '100%', height: '100%', borderRadius: 8, backgroundColor: COLORS.panelRaised },
+  sheetPosterFallback: { alignItems: 'center', justifyContent: 'center', gap: 6 },
   sheetCopy: { flex: 1, paddingTop: 8 },
+  sheetDetailsLoading: { alignSelf: 'flex-start', marginTop: 12 },
   sheetTitle: { color: COLORS.paper, fontSize: 27, lineHeight: 29, fontWeight: '900', letterSpacing: -1.2, marginTop: 7 },
   sheetClose: { width: 36, height: 36, borderRadius: 18, borderWidth: 1, borderColor: COLORS.line, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(16,20,39,0.7)' },
+  sheetTagline: { color: COLORS.cyan, fontSize: 12, lineHeight: 18, fontStyle: 'italic', marginTop: 18 },
+  sheetGenres: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 12 },
+  sheetGenre: { color: COLORS.muted, fontSize: 10, fontWeight: '800', paddingHorizontal: 8, paddingVertical: 5, borderRadius: 10, borderWidth: 1, borderColor: 'rgba(83,229,255,0.22)', backgroundColor: 'rgba(83,229,255,0.06)' },
   sheetOverview: { color: '#bdc7e2', fontSize: 14, lineHeight: 21, marginTop: 22, marginBottom: 20 },
+  genreErrorState: { alignItems: 'center', justifyContent: 'center', paddingHorizontal: 20, paddingVertical: 60, gap: 10 },
 });
