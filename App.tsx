@@ -37,6 +37,7 @@ type Movie = {
   first_air_date?: string;
   number_of_seasons?: number;
   vote_average?: number;
+  popularity?: number;
   media_type?: string;
   genre_ids?: number[];
   genres?: { id: number; name: string }[];
@@ -93,6 +94,41 @@ const yearOf = (movie: Movie) => (movie.release_date || movie.first_air_date || 
 const isSeries = (movie: Movie) => movie.media_type === 'tv' || Boolean(movie.first_air_date);
 const typeLabel = (movie: Movie) => (isSeries(movie) ? 'Series' : 'Film');
 const API_REQUEST_TIMEOUT_MS = 15_000;
+
+function genreIdsOf(movie: Movie) {
+  return movie.genres?.map((genre) => genre.id) || movie.genre_ids || [];
+}
+
+function sharesStudio(first: Movie, second: Movie) {
+  const firstStudios = first.production_companies || [];
+  const secondStudios = second.production_companies || [];
+  return firstStudios.some((firstStudio) => secondStudios.some((secondStudio) => (
+    firstStudio.id === secondStudio.id
+      || Boolean(firstStudio.name && secondStudio.name && firstStudio.name.toLowerCase() === secondStudio.name.toLowerCase())
+  )));
+}
+
+function rankRelatedMovies(target: Movie, pool: Movie[], limit = 12) {
+  const targetGenres = new Set(genreIdsOf(target));
+  const targetType = isSeries(target) ? 'tv' : 'movie';
+
+  return pool
+    .filter((movie) => movie.id !== target.id)
+    .map((movie) => {
+      const matchingGenres = genreIdsOf(movie).filter((id) => targetGenres.has(id));
+      let score = 0;
+      if (sharesStudio(target, movie)) score += 2000;
+      score += matchingGenres.length * 500;
+      if (matchingGenres.length === targetGenres.size && targetGenres.size > 0) score += 2000;
+      if ((isSeries(movie) ? 'tv' : 'movie') === targetType) score += 100;
+      score += (movie.vote_average || 0) * 10;
+      score += Math.log10(Math.max(movie.popularity || 0, 1));
+      return { movie, score };
+    })
+    .sort((first, second) => second.score - first.score)
+    .slice(0, limit)
+    .map(({ movie }) => movie);
+}
 
 function resolveApiUrl(value: string) {
   if (/^https?:\/\//i.test(value)) return value;
@@ -766,7 +802,97 @@ function NativeVideoSurface({
   );
 }
 
-function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => void }) {
+function PlayerRelatedCard({
+  movie,
+  isStudioPick,
+  onPress,
+}: {
+  movie: Movie;
+  isStudioPick?: boolean;
+  onPress: (movie: Movie) => void;
+}) {
+  return (
+    <Pressable
+      accessibilityLabel={`Open ${titleOf(movie)}`}
+      onPress={() => onPress(movie)}
+      style={({ pressed }) => [styles.playerRelatedCard, pressed && styles.posterPressed]}
+    >
+      <View style={styles.playerRelatedPoster}>
+        {movie.poster_path ? (
+          <Image source={{ uri: `${POSTER_URL}${movie.poster_path}` }} style={styles.posterImage} resizeMode="cover" />
+        ) : (
+          <View style={styles.posterFallback}>
+            <Icon name="film-outline" size={24} color={COLORS.muted} />
+          </View>
+        )}
+        <LinearGradient
+          colors={['transparent', 'rgba(8,10,18,0.86)']}
+          style={styles.posterGradient}
+        />
+        <View style={styles.playerRelatedPlay}>
+          <Icon name="play" size={12} color={COLORS.ink} />
+        </View>
+        {isStudioPick ? <Text style={styles.studioPickBadge}>Studio pick</Text> : null}
+      </View>
+      <Text numberOfLines={2} style={styles.playerRelatedTitle}>{titleOf(movie)}</Text>
+      <Text style={styles.playerRelatedMeta}>{rating(movie)} ★  ·  {yearOf(movie)}</Text>
+    </Pressable>
+  );
+}
+
+function PlayerShelf({
+  kicker,
+  title,
+  note,
+  movies,
+  studioMovieIds,
+  onPress,
+}: {
+  kicker: string;
+  title: string;
+  note: string;
+  movies: Movie[];
+  studioMovieIds?: Set<number>;
+  onPress: (movie: Movie) => void;
+}) {
+  if (!movies.length) return null;
+
+  return (
+    <View style={styles.playerShelfSection}>
+      <View style={styles.playerShelfHeading}>
+        <View style={styles.shelfHeadingCopy}>
+          <Text style={styles.sectionKicker}>{kicker}</Text>
+          <Text style={styles.playerShelfTitle}>{title}</Text>
+        </View>
+        <Text style={styles.playerShelfNote}>{note}</Text>
+      </View>
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.playerShelfTrack}
+      >
+        {movies.map((movie) => (
+          <PlayerRelatedCard
+            key={`${isSeries(movie) ? 'tv' : 'movie'}:${movie.id}`}
+            movie={movie}
+            isStudioPick={studioMovieIds?.has(movie.id)}
+            onPress={onPress}
+          />
+        ))}
+      </ScrollView>
+    </View>
+  );
+}
+
+function NativePlayerScreen({
+  movie,
+  onClose,
+  onSelectMovie,
+}: {
+  movie: Movie;
+  onClose: () => void;
+  onSelectMovie: (movie: Movie) => void;
+}) {
   const [server, setServer] = useState(PLAYBACK_SERVERS[0]);
   const [requestVersion, setRequestVersion] = useState(0);
   const [sources, setSources] = useState<PlaybackSource[]>([]);
@@ -776,6 +902,83 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
   const [sourceError, setSourceError] = useState('');
   const [playerError, setPlayerError] = useState('');
   const [videoReady, setVideoReady] = useState(false);
+  const [playerDetails, setPlayerDetails] = useState<Movie>(movie);
+  const [relatedMovies, setRelatedMovies] = useState<Movie[]>([]);
+  const [studioMovies, setStudioMovies] = useState<Movie[]>([]);
+  const [relatedLoading, setRelatedLoading] = useState(true);
+  const [relatedError, setRelatedError] = useState('');
+
+  useEffect(() => {
+    const controller = new AbortController();
+    let active = true;
+    const type = isSeries(movie) ? 'tv' : 'movie';
+
+    setPlayerDetails(movie);
+    setRelatedMovies([]);
+    setStudioMovies([]);
+    setRelatedLoading(true);
+    setRelatedError('');
+
+    const loadRelated = async () => {
+      try {
+        const payload = await fetchApiJson<Movie>(`/api/movie/${movie.id}?type=${type}`, { signal: controller.signal });
+        if (!active) return;
+
+        const details: Movie = {
+          ...movie,
+          ...payload,
+          genre_ids: payload.genres?.map((genre) => genre.id) || payload.genre_ids || movie.genre_ids || [],
+        };
+        setPlayerDetails(details);
+
+        const collectionType = type;
+        const currentGenre = genreIdsOf(details)[0];
+        const studio = details.production_companies?.find((company) => company.name.toLowerCase().includes('vivamax'))
+          || details.production_companies?.[0];
+        const [generalResponse, genreResponse, studioResponse] = await Promise.all([
+          fetchApiJson<{ results?: Movie[] }>(`/${collectionType === 'tv' ? 'api/tv/collection' : 'api/movies/collection'}`, { signal: controller.signal }),
+          currentGenre
+            ? fetchApiJson<{ results?: Movie[] }>(`/api/movies/genre/${currentGenre}?type=${collectionType}`, { signal: controller.signal })
+            : Promise.resolve({ results: [] as Movie[] }),
+          studio
+            ? fetchApiJson<{ results?: Movie[] }>(`/api/movies/studio/${studio.id}?type=${collectionType}`, { signal: controller.signal })
+            : Promise.resolve({ results: [] as Movie[] }),
+        ]);
+        if (!active) return;
+
+        const normalizedStudioMovies = (studioResponse.results || [])
+          .filter((item) => item.id !== details.id)
+          .map((item) => ({
+            ...item,
+            media_type: item.media_type || collectionType,
+            production_companies: studio ? [{ id: studio.id, name: studio.name }] : item.production_companies,
+          }));
+        const combinedPool = [
+          ...normalizedStudioMovies,
+          ...(genreResponse.results || []),
+          ...(generalResponse.results || []),
+        ];
+        const uniquePool = Array.from(
+          new Map(combinedPool.map((item) => [`${isSeries(item) ? 'tv' : 'movie'}:${item.id}`, item])).values(),
+        );
+
+        setStudioMovies(Array.from(new Map(normalizedStudioMovies.map((item) => [item.id, item])).values()));
+        setRelatedMovies(rankRelatedMovies(details, uniquePool));
+      } catch (cause) {
+        if (active && !isAbortError(cause)) {
+          setRelatedError('Related titles are unavailable right now.');
+        }
+      } finally {
+        if (active) setRelatedLoading(false);
+      }
+    };
+
+    void loadRelated();
+    return () => {
+      active = false;
+      controller.abort();
+    };
+  }, [movie]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -842,6 +1045,15 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
   const selectedSource = sources.find((source) => source.id === selectedSourceId) || sources[0];
   const nextServer = PLAYBACK_SERVERS[(PLAYBACK_SERVERS.indexOf(server) + 1) % PLAYBACK_SERVERS.length];
   const displayError = playerError || sourceError;
+  const studioMovieIds = useMemo(() => new Set(studioMovies.map((item) => item.id)), [studioMovies]);
+  const exploreMovies = useMemo(() => {
+    const nonStudioMovies = relatedMovies.filter((item) => !studioMovieIds.has(item.id));
+    return nonStudioMovies.length ? nonStudioMovies : relatedMovies;
+  }, [relatedMovies, studioMovieIds]);
+  const studioName = playerDetails.production_companies?.find((company) => company.name.toLowerCase().includes('vivamax'))?.name
+    || playerDetails.production_companies?.[0]?.name;
+  const playerGenres = playerDetails.genres?.map((genre) => genre.name).slice(0, 4) || [];
+  const playerStudios = playerDetails.production_companies?.map((company) => company.name).filter(Boolean).slice(0, 3) || [];
 
   return (
     <View style={styles.playerScreen}>
@@ -911,34 +1123,93 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
               </>
             )}
           </View>
-          <View style={styles.playerBody}>
-            <View style={styles.playerBodyHeading}>
-              <View>
-                <Text style={styles.sectionKicker}>Stream quality</Text>
-                <Text style={styles.playerProvider}>{selectedSource.provider}</Text>
+          <ScrollView
+            style={styles.playerBodyScroll}
+            contentContainerStyle={styles.playerBodyContent}
+            showsVerticalScrollIndicator={false}
+            nestedScrollEnabled
+          >
+            <View style={styles.playerBody}>
+              <View style={styles.playerBodyHeading}>
+                <View>
+                  <Text style={styles.sectionKicker}>Stream quality</Text>
+                  <Text style={styles.playerProvider}>{selectedSource.provider}</Text>
+                </View>
+                <Text style={styles.nativeBadge}>NATIVE</Text>
               </View>
-              <Text style={styles.nativeBadge}>NATIVE</Text>
+              <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.qualityTrack}>
+                {sources.map((source) => (
+                  <Pressable
+                    key={source.id}
+                    onPress={() => {
+                      setSelectedSourceId(source.id);
+                      setPlayerError('');
+                      setVideoReady(false);
+                    }}
+                    style={[styles.qualityChip, source.id === selectedSource.id && styles.qualityChipActive]}
+                  >
+                    <Icon name="play-circle-outline" size={16} color={source.id === selectedSource.id ? COLORS.ink : COLORS.cyan} />
+                    <Text style={[styles.qualityChipText, source.id === selectedSource.id && styles.qualityChipTextActive]}>{source.quality}</Text>
+                  </Pressable>
+                ))}
+              </ScrollView>
+              <Text style={styles.playerHint}>
+                Native controls provide play, seek, fullscreen, and stream settings. {subtitles.length ? `${subtitles.length} subtitle track${subtitles.length === 1 ? '' : 's'} returned by the API.` : 'No external subtitle tracks were returned for this title.'}
+              </Text>
+
+              <View style={styles.playerStoryCard}>
+                <Text style={styles.sectionKicker}>The story</Text>
+                <Text style={styles.playerStoryTitle}>Stay for the next scene.</Text>
+                <Text style={styles.playerStoryCopy}>{playerDetails.overview || 'No synopsis is available for this title yet.'}</Text>
+                <View style={styles.playerInfoRows}>
+                  <View style={styles.playerInfoRow}>
+                    <Text style={styles.playerInfoLabel}>Genres</Text>
+                    <Text style={styles.playerInfoValue}>{playerGenres.join(' · ') || '—'}</Text>
+                  </View>
+                  <View style={styles.playerInfoRow}>
+                    <Text style={styles.playerInfoLabel}>Studios</Text>
+                    <Text style={styles.playerInfoValue}>{playerStudios.join(' · ') || '—'}</Text>
+                  </View>
+                </View>
+              </View>
+
+              {relatedLoading ? (
+                <View style={styles.playerRelatedLoading}>
+                  <ActivityIndicator color={COLORS.lime} />
+                  <Text style={styles.mutedText}>Curating what to watch next…</Text>
+                </View>
+              ) : relatedError ? (
+                <Text style={styles.playerRelatedError}>{relatedError}</Text>
+              ) : (
+                <>
+                  <PlayerShelf
+                    kicker="Keep watching"
+                    title="Up next"
+                    note={relatedMovies.length ? `${Math.min(relatedMovies.length, 6)} picks` : 'No picks yet'}
+                    movies={relatedMovies.slice(0, 6)}
+                    studioMovieIds={studioMovieIds}
+                    onPress={onSelectMovie}
+                  />
+                  <PlayerShelf
+                    kicker="Behind the frame"
+                    title="More in this studio"
+                    note={studioName || 'Same production house'}
+                    movies={studioMovies.slice(0, 12)}
+                    studioMovieIds={studioMovieIds}
+                    onPress={onSelectMovie}
+                  />
+                  <PlayerShelf
+                    kicker="Curated next"
+                    title="More to explore"
+                    note={exploreMovies.length ? `${exploreMovies.length} titles` : 'Keep exploring'}
+                    movies={exploreMovies}
+                    studioMovieIds={studioMovieIds}
+                    onPress={onSelectMovie}
+                  />
+                </>
+              )}
             </View>
-            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.qualityTrack}>
-              {sources.map((source) => (
-                <Pressable
-                  key={source.id}
-                  onPress={() => {
-                    setSelectedSourceId(source.id);
-                    setPlayerError('');
-                    setVideoReady(false);
-                  }}
-                  style={[styles.qualityChip, source.id === selectedSource.id && styles.qualityChipActive]}
-                >
-                  <Icon name="play-circle-outline" size={16} color={source.id === selectedSource.id ? COLORS.ink : COLORS.cyan} />
-                  <Text style={[styles.qualityChipText, source.id === selectedSource.id && styles.qualityChipTextActive]}>{source.quality}</Text>
-                </Pressable>
-              ))}
-            </ScrollView>
-            <Text style={styles.playerHint}>
-              Native controls provide play, seek, fullscreen, and stream settings. {subtitles.length ? `${subtitles.length} subtitle track${subtitles.length === 1 ? '' : 's'} returned by the API.` : 'No external subtitle tracks were returned for this title.'}
-            </Text>
-          </View>
+          </ScrollView>
         </>
       ) : null}
     </View>
@@ -1105,6 +1376,10 @@ function CinemaApp() {
     setSelectedMovie(null);
     setPlayerMovie(movie);
   };
+  const openPlayerRelatedMovie = (movie: Movie) => {
+    setPlayerMovie(null);
+    setSelectedMovie(movie);
+  };
 
   const openGenre = (id: number) => {
     setSelectedGenreId(id);
@@ -1193,7 +1468,11 @@ function CinemaApp() {
     <SafeAreaView style={styles.safe} edges={['top', 'bottom']}>
       <StatusBar style="light" />
       {playerMovie ? (
-        <NativePlayerScreen movie={playerMovie} onClose={() => setPlayerMovie(null)} />
+        <NativePlayerScreen
+          movie={playerMovie}
+          onClose={() => setPlayerMovie(null)}
+          onSelectMovie={openPlayerRelatedMovie}
+        />
       ) : loading ? (
         <View style={styles.loadingScreen}>
           <View style={styles.loadingMark}><Brand /></View>
@@ -1253,7 +1532,9 @@ const styles = StyleSheet.create({
   videoErrorCopy: { color: COLORS.muted, fontSize: 11, lineHeight: 16, textAlign: 'center', maxWidth: 310 },
   playerRetryButton: { minHeight: 40, paddingHorizontal: 14, borderRadius: 13, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: COLORS.lime, marginTop: 8 },
   playerRetryText: { color: COLORS.ink, fontSize: 12, fontWeight: '900' },
-  playerBody: { flex: 1, paddingHorizontal: 18, paddingTop: 20 },
+  playerBodyScroll: { flex: 1 },
+  playerBodyContent: { paddingBottom: 30 },
+  playerBody: { paddingHorizontal: 18, paddingTop: 20 },
   playerBodyHeading: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
   playerProvider: { color: COLORS.paper, fontSize: 14, fontWeight: '800', marginTop: 5 },
   nativeBadge: { color: COLORS.ink, backgroundColor: COLORS.lime, borderRadius: 5, paddingHorizontal: 7, paddingVertical: 5, fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
@@ -1263,6 +1544,26 @@ const styles = StyleSheet.create({
   qualityChipText: { color: COLORS.paper, fontSize: 12, fontWeight: '900' },
   qualityChipTextActive: { color: COLORS.ink },
   playerHint: { color: COLORS.muted, fontSize: 12, lineHeight: 18 },
+  playerStoryCard: { marginTop: 24, padding: 16, borderRadius: 18, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panel },
+  playerStoryTitle: { color: COLORS.paper, fontSize: 20, lineHeight: 24, fontWeight: '900', letterSpacing: -0.7, marginTop: 7 },
+  playerStoryCopy: { color: '#bdc7e2', fontSize: 13, lineHeight: 20, marginTop: 10 },
+  playerInfoRows: { marginTop: 15, gap: 11 },
+  playerInfoRow: { paddingTop: 11, borderTopWidth: 1, borderTopColor: 'rgba(186,197,255,0.12)', gap: 4 },
+  playerInfoLabel: { color: COLORS.muted, fontSize: 9, fontWeight: '900', letterSpacing: 1.3, textTransform: 'uppercase' },
+  playerInfoValue: { color: '#dce2fb', fontSize: 12, lineHeight: 18 },
+  playerRelatedLoading: { minHeight: 110, alignItems: 'center', justifyContent: 'center', gap: 9 },
+  playerRelatedError: { color: COLORS.muted, fontSize: 12, lineHeight: 18, paddingVertical: 22, textAlign: 'center' },
+  playerShelfSection: { marginTop: 29 },
+  playerShelfHeading: { flexDirection: 'row', alignItems: 'flex-end', justifyContent: 'space-between', gap: 12, marginBottom: 13 },
+  playerShelfTitle: { color: COLORS.paper, fontSize: 24, lineHeight: 27, fontWeight: '900', letterSpacing: -1.1, marginTop: 6 },
+  playerShelfNote: { color: COLORS.muted, fontSize: 10, paddingBottom: 2, textAlign: 'right', maxWidth: 125 },
+  playerShelfTrack: { gap: 11, paddingBottom: 3 },
+  playerRelatedCard: { width: 116 },
+  playerRelatedPoster: { width: 116, height: 174, overflow: 'hidden', borderRadius: 9, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panelRaised, position: 'relative' },
+  playerRelatedPlay: { position: 'absolute', bottom: 8, left: 8, width: 27, height: 27, borderRadius: 14, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.lime },
+  studioPickBadge: { position: 'absolute', right: 6, bottom: 7, maxWidth: 76, paddingHorizontal: 6, paddingVertical: 4, borderRadius: 5, color: COLORS.ink, backgroundColor: COLORS.lime, fontSize: 8, fontWeight: '900' },
+  playerRelatedTitle: { color: '#e2e6ff', fontSize: 12, lineHeight: 16, fontWeight: '800', marginTop: 8 },
+  playerRelatedMeta: { color: COLORS.muted, fontSize: 10, marginTop: 4 },
   screenFill: { flex: 1 },
   homeContent: { paddingBottom: 36 },
   catalogContent: { paddingHorizontal: 18, paddingBottom: 36 },
