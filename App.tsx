@@ -80,6 +80,12 @@ const API_URL = (process.env.EXPO_PUBLIC_API_URL || 'https://sage-cinema-nu.verc
 const POSTER_URL = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP_URL = 'https://image.tmdb.org/t/p/w1280';
 const PLAYBACK_SERVERS = ['cdn', 'vsrc', 'm4uhd', 'superflix'];
+const PLAYBACK_SERVER_LABELS: Record<string, string> = {
+  cdn: 'CDN pool',
+  vsrc: 'Stream pool',
+  m4uhd: 'HD pool',
+  superflix: 'Backup pool',
+};
 const EMPTY_COLLECTIONS: Collections = {
   trending: [],
   latest: [],
@@ -884,6 +890,40 @@ function PlayerShelf({
   );
 }
 
+function PlayerServerPicker({
+  server,
+  onChange,
+}: {
+  server: string;
+  onChange: (server: string) => void;
+}) {
+  return (
+    <View style={styles.serverPicker}>
+      <View style={styles.serverPickerHeading}>
+        <Text style={styles.playerSubsectionLabel}>Source pool</Text>
+        <Text style={styles.serverCurrent}>{PLAYBACK_SERVER_LABELS[server] || server}</Text>
+      </View>
+      <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.serverTrack}>
+        {PLAYBACK_SERVERS.map((candidate) => {
+          const selected = candidate === server;
+          return (
+            <Pressable
+              key={candidate}
+              accessibilityRole="button"
+              accessibilityState={{ selected }}
+              onPress={() => onChange(candidate)}
+              style={({ pressed }) => [styles.serverChip, selected && styles.serverChipActive, pressed && styles.pressed]}
+            >
+              <Icon name={selected ? 'radio-button-on' : 'radio-button-off'} size={14} color={selected ? COLORS.ink : COLORS.cyan} />
+              <Text style={[styles.serverChipText, selected && styles.serverChipTextActive]}>{PLAYBACK_SERVER_LABELS[candidate] || candidate}</Text>
+            </Pressable>
+          );
+        })}
+      </ScrollView>
+    </View>
+  );
+}
+
 function NativePlayerScreen({
   movie,
   onClose,
@@ -1054,6 +1094,13 @@ function NativePlayerScreen({
     || playerDetails.production_companies?.[0]?.name;
   const playerGenres = playerDetails.genres?.map((genre) => genre.name).slice(0, 4) || [];
   const playerStudios = playerDetails.production_companies?.map((company) => company.name).filter(Boolean).slice(0, 3) || [];
+  const handleServerChange = (candidate: string) => {
+    setPlayerError('');
+    setSourceError('');
+    setVideoReady(false);
+    if (candidate === server) setRequestVersion((value) => value + 1);
+    else setServer(candidate);
+  };
 
   return (
     <View style={styles.playerScreen}>
@@ -1075,7 +1122,7 @@ function NativePlayerScreen({
           <Text style={styles.mutedText}>Connecting to the {server} source pool…</Text>
         </View>
       ) : displayError && !selectedSource ? (
-        <View style={styles.playerErrorState}>
+        <ScrollView style={styles.playerErrorScroll} contentContainerStyle={styles.playerErrorState} showsVerticalScrollIndicator={false}>
           <View style={styles.emptyIcon}><Icon name="warning-outline" size={29} color={COLORS.pink} /></View>
           <Text style={styles.sectionKicker}>Playback signal lost</Text>
           <Text style={styles.playerErrorTitle}>{displayError}</Text>
@@ -1084,7 +1131,8 @@ function NativePlayerScreen({
             <ActionButton label="Retry" icon="refresh" onPress={() => setRequestVersion((value) => value + 1)} />
             <ActionButton label={`Try ${nextServer}`} icon="swap-horizontal" onPress={() => setServer(nextServer)} secondary />
           </View>
-        </View>
+          <PlayerServerPicker server={server} onChange={handleServerChange} />
+        </ScrollView>
       ) : selectedSource ? (
         <>
           <View style={styles.videoStage}>
@@ -1153,6 +1201,7 @@ function NativePlayerScreen({
                   </Pressable>
                 ))}
               </ScrollView>
+              <PlayerServerPicker server={server} onChange={handleServerChange} />
               <Text style={styles.playerHint}>
                 Native controls provide play, seek, fullscreen, and stream settings. {subtitles.length ? `${subtitles.length} subtitle track${subtitles.length === 1 ? '' : 's'} returned by the API.` : 'No external subtitle tracks were returned for this title.'}
               </Text>
@@ -1519,7 +1568,8 @@ const styles = StyleSheet.create({
   playerHeaderMeta: { color: COLORS.cyan, fontSize: 11, fontWeight: '900', letterSpacing: 0.6 },
   playerLoading: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, gap: 10 },
   playerLoadingTitle: { color: COLORS.paper, fontSize: 19, fontWeight: '900', marginTop: 7 },
-  playerErrorState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, gap: 9 },
+  playerErrorScroll: { flex: 1 },
+  playerErrorState: { alignItems: 'center', paddingHorizontal: 28, paddingTop: 32, paddingBottom: 30, gap: 9 },
   playerErrorTitle: { color: COLORS.paper, fontSize: 20, lineHeight: 24, fontWeight: '900', textAlign: 'center', marginTop: 2 },
   playerErrorCopy: { color: COLORS.muted, fontSize: 13, lineHeight: 19, textAlign: 'center', maxWidth: 320 },
   playerErrorActions: { flexDirection: 'row', gap: 9, marginTop: 12 },
@@ -1543,6 +1593,15 @@ const styles = StyleSheet.create({
   qualityChipActive: { borderColor: COLORS.lime, backgroundColor: COLORS.lime },
   qualityChipText: { color: COLORS.paper, fontSize: 12, fontWeight: '900' },
   qualityChipTextActive: { color: COLORS.ink },
+  serverPicker: { alignSelf: 'stretch', marginTop: 2 },
+  serverPickerHeading: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', gap: 12 },
+  playerSubsectionLabel: { color: COLORS.muted, fontSize: 9, fontWeight: '900', letterSpacing: 1.2, textTransform: 'uppercase' },
+  serverCurrent: { color: COLORS.cyan, fontSize: 10, fontWeight: '800' },
+  serverTrack: { gap: 8, paddingVertical: 10, alignItems: 'center' },
+  serverChip: { minHeight: 35, paddingHorizontal: 10, borderRadius: 11, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panel, flexDirection: 'row', alignItems: 'center', gap: 5 },
+  serverChipActive: { borderColor: COLORS.cyan, backgroundColor: 'rgba(83,229,255,0.12)' },
+  serverChipText: { color: COLORS.muted, fontSize: 10, fontWeight: '800' },
+  serverChipTextActive: { color: COLORS.paper },
   playerHint: { color: COLORS.muted, fontSize: 12, lineHeight: 18 },
   playerStoryCard: { marginTop: 24, padding: 16, borderRadius: 18, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panel },
   playerStoryTitle: { color: COLORS.paper, fontSize: 20, lineHeight: 24, fontWeight: '900', letterSpacing: -0.7, marginTop: 7 },
