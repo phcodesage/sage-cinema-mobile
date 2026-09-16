@@ -2,7 +2,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { VideoView, useVideoPlayer } from 'expo-video';
 import { StatusBar } from 'expo-status-bar';
-import { useCallback, useEffect, useMemo, useState, type ReactElement } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactElement } from 'react';
 import {
   ActivityIndicator,
   BackHandler,
@@ -92,10 +92,51 @@ const titleOf = (movie: Movie) => movie.title || movie.name || 'Untitled';
 const yearOf = (movie: Movie) => (movie.release_date || movie.first_air_date || '').slice(0, 4) || '—';
 const isSeries = (movie: Movie) => movie.media_type === 'tv' || Boolean(movie.first_air_date);
 const typeLabel = (movie: Movie) => (isSeries(movie) ? 'Series' : 'Film');
+const API_REQUEST_TIMEOUT_MS = 15_000;
 
 function resolveApiUrl(value: string) {
   if (/^https?:\/\//i.test(value)) return value;
   return `${API_URL}${value.startsWith('/') ? '' : '/'}${value}`;
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === 'AbortError'
+    || error instanceof Error && error.name === 'AbortError';
+}
+
+async function fetchApiJson<T>(
+  path: string,
+  options: { signal?: AbortSignal; timeoutMs?: number } = {},
+): Promise<T> {
+  const timeoutMs = options.timeoutMs || API_REQUEST_TIMEOUT_MS;
+  const requestController = new AbortController();
+  const timeoutId = setTimeout(() => requestController.abort(), timeoutMs);
+  const abortRequest = () => requestController.abort();
+
+  if (options.signal?.aborted) requestController.abort();
+  else options.signal?.addEventListener('abort', abortRequest, { once: true });
+
+  try {
+    const response = await fetch(resolveApiUrl(path), { signal: requestController.signal });
+    const payload = await response.json() as unknown;
+    if (!response.ok) {
+      const message = payload && typeof payload === 'object' && 'error' in payload && typeof payload.error === 'string'
+        ? payload.error
+        : `API request failed with status ${response.status}`;
+      throw new Error(message);
+    }
+    return payload as T;
+  } catch (error) {
+    if (requestController.signal.aborted && !options.signal?.aborted) {
+      const timeoutError = new Error(`API request timed out after ${timeoutMs}ms`);
+      timeoutError.name = 'TimeoutError';
+      throw timeoutError;
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener('abort', abortRequest);
+  }
 }
 
 function rating(movie: Movie) {
@@ -460,15 +501,12 @@ function MovieSheet({
     }
 
     let active = true;
+    const controller = new AbortController();
     setDetails(movie);
     setDetailsLoading(true);
     setPosterFailed(false);
 
-    fetch(`${API_URL}/api/movie/${movie.id}?type=${mediaType}`)
-      .then((response) => {
-        if (!response.ok) throw new Error(`Movie details request failed with status ${response.status}`);
-        return response.json() as Promise<Movie>;
-      })
+    fetchApiJson<Movie>(`/api/movie/${movie.id}?type=${mediaType}`, { signal: controller.signal })
       .then((payload) => {
         if (active && payload && payload.id === movie.id) setDetails({ ...movie, ...payload });
       })
@@ -479,6 +517,7 @@ function MovieSheet({
 
     return () => {
       active = false;
+      controller.abort();
     };
   }, [mediaType, movie?.id]);
 
@@ -740,7 +779,7 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
 
   useEffect(() => {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 20000);
+    let active = true;
     const type = isSeries(movie) ? 'tv' : 'movie';
     const params = [
       ['player', 'unified'],
@@ -763,12 +802,10 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
     setSelectedSourceId('');
     setVideoReady(false);
 
-    fetch(`${API_URL}/api/video-sources/${type}/${movie.id}?${params}`, { signal: controller.signal })
-      .then(async (response) => {
-        const payload = await response.json() as { player?: string; sources?: unknown[]; subtitles?: unknown[]; error?: string };
-        if (!response.ok) throw new Error(payload.error || 'The source service returned an error.');
-        return payload;
-      })
+    fetchApiJson<{ player?: string; sources?: unknown[]; subtitles?: unknown[] }>(
+      `/api/video-sources/${type}/${movie.id}?${params}`,
+      { signal: controller.signal, timeoutMs: 20_000 },
+    )
       .then((payload) => {
         if (payload.player && payload.player !== 'unified') {
           throw new Error('The selected source is not compatible with the native player.');
@@ -785,19 +822,19 @@ function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => v
         setSelectedSourceId(nextSources[0].id);
       })
       .catch((requestError: unknown) => {
-        if (controller.signal.aborted) {
+        if (!active || isAbortError(requestError)) return;
+        if (requestError instanceof Error && requestError.name === 'TimeoutError') {
           setSourceError('The source request timed out. Check your connection and try again.');
         } else {
           setSourceError(requestError instanceof Error ? requestError.message : 'The source service is unavailable.');
         }
       })
       .finally(() => {
-        clearTimeout(timeout);
-        setLoading(false);
+        if (active) setLoading(false);
       });
 
     return () => {
-      clearTimeout(timeout);
+      active = false;
       controller.abort();
     };
   }, [movie, requestVersion, server]);
@@ -925,8 +962,12 @@ function CinemaApp() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState('');
+  const catalogRequestRef = useRef<AbortController | null>(null);
 
   const loadCatalog = async (isRefresh = false) => {
+    catalogRequestRef.current?.abort();
+    const controller = new AbortController();
+    catalogRequestRef.current = controller;
     if (isRefresh) setRefreshing(true);
     else setLoading(true);
     try {
@@ -939,9 +980,8 @@ function CinemaApp() {
         '/api/anime/collection',
         '/api/genres',
       ];
-      const responses = await Promise.all(urls.map((path) => fetch(`${API_URL}${path}`)));
-      if (responses.some((response) => !response.ok)) throw new Error('Catalog request failed');
-      const payloads = await Promise.all(responses.map((response) => response.json()));
+      const payloads = await Promise.all(urls.map((path) => fetchApiJson<{ results?: Movie[]; genres?: { id: number; name: string }[] }>(path, { signal: controller.signal })));
+      if (controller.signal.aborted || catalogRequestRef.current !== controller) return;
       setCollections({
         trending: payloads[0].results || [],
         tv: payloads[1].results || [],
@@ -956,16 +996,24 @@ function CinemaApp() {
       });
       setGenres(nextGenres);
       setError('');
-    } catch {
-      setError('The cinema signal is taking a little longer than usual.');
+    } catch (cause) {
+      if (catalogRequestRef.current === controller && !isAbortError(cause)) {
+        setError(cause instanceof Error && cause.name === 'TimeoutError'
+          ? 'The cinema signal timed out. Check your connection and try again.'
+          : 'The cinema signal is taking a little longer than usual.');
+      }
     } finally {
-      setLoading(false);
-      setRefreshing(false);
+      if (catalogRequestRef.current === controller) {
+        catalogRequestRef.current = null;
+        setLoading(false);
+        setRefreshing(false);
+      }
     }
   };
 
   useEffect(() => {
     void loadCatalog();
+    return () => catalogRequestRef.current?.abort();
   }, []);
 
   useEffect(() => {
@@ -976,14 +1024,14 @@ function CinemaApp() {
       return;
     }
     let active = true;
+    const controller = new AbortController();
     setSearching(true);
     const timer = setTimeout(async () => {
       try {
-        const response = await fetch(`${API_URL}/api/search?query=${encodeURIComponent(search)}`);
-        const payload = response.ok ? await response.json() : { results: [] };
+        const payload = await fetchApiJson<{ results?: Movie[] }>(`/api/search?query=${encodeURIComponent(search)}`, { signal: controller.signal });
         if (active) setSearchResults(payload.results || []);
-      } catch {
-        if (active) setSearchResults([]);
+      } catch (cause) {
+        if (active && !isAbortError(cause)) setSearchResults([]);
       } finally {
         if (active) setSearching(false);
       }
@@ -991,6 +1039,7 @@ function CinemaApp() {
     return () => {
       active = false;
       clearTimeout(timer);
+      controller.abort();
     };
   }, [activeTab, query]);
 
@@ -1002,11 +1051,7 @@ function CinemaApp() {
     setGenreLoading(true);
     setGenreError('');
 
-    fetch(`${API_URL}/api/movies/genre/${selectedGenreId}`, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`Genre request failed with status ${response.status}`);
-        return response.json() as Promise<{ results?: Movie[] }>;
-      })
+    fetchApiJson<{ results?: Movie[] }>(`/api/movies/genre/${selectedGenreId}`, { signal: controller.signal })
       .then((payload) => {
         if (active) setGenreMovies(Array.isArray(payload.results) ? payload.results : []);
       })
