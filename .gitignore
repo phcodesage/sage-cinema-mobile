@@ -1,4 +1,5 @@
 node_modules/
+.local/
 .expo/
 dist/
 web-build/
