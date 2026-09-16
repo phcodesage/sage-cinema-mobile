@@ -23,4 +23,18 @@ To create a native Android build with a connected emulator or device:
 npx expo run:android
 ```
 
+For a standalone Android artifact with the JavaScript bundle embedded:
+
+```bash
+cd android
+NODE_ENV=production ./gradlew clean assembleRelease
+```
+
+If an existing checkout was moved to a new path and Gradle reports a dependency path from the old location, regenerate the ignored native build state before retrying:
+
+```bash
+cd android
+./gradlew clean
+```
+
 The app’s Play action opens the existing Sage Cinema player URL so the current streaming resolver and playback stack remain the source of truth.
