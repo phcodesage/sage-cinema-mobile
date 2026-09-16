@@ -328,7 +328,7 @@ function SearchScreen({
   onPress: (movie: Movie) => void;
 }) {
   return (
-    <ScrollView contentContainerStyle={styles.pageContent} keyboardShouldPersistTaps="handled">
+    <View style={styles.searchScreen}>
       <ScreenHeading eyebrow="Catalog search" title="Find your next watch." detail="Films, series, and anime from one place." />
       <View style={styles.searchField}>
         <Icon name="search" size={21} color={COLORS.cyan} />
@@ -348,17 +348,24 @@ function SearchScreen({
           </Pressable>
         ) : null}
       </View>
-      {query && results.length ? (
-        <CatalogGrid movies={results} onPress={onPress} />
-      ) : (
-        <View style={styles.emptyState}>
-          <View style={styles.emptyIcon}><Icon name={query ? 'film-outline' : 'search-outline'} size={30} color={COLORS.cyan} /></View>
-          <Text style={styles.sectionKicker}>{query ? 'No matches yet' : 'Open the catalog'}</Text>
-          <Text style={styles.emptyTitle}>{query ? 'Nothing in this signal.' : 'What are you in the mood for?'}</Text>
-          <Text style={styles.emptyCopy}>{query ? 'Try another title, spelling, or platform.' : 'Search by title, series, or platform and we’ll bring the screening room to you.'}</Text>
-        </View>
-      )}
-    </ScrollView>
+      <ScrollView
+        style={styles.screenFill}
+        contentContainerStyle={styles.searchResultsContent}
+        keyboardShouldPersistTaps="handled"
+        showsVerticalScrollIndicator={false}
+      >
+        {query && results.length ? (
+          <CatalogGrid movies={results} onPress={onPress} />
+        ) : (
+          <View style={styles.emptyState}>
+            <View style={styles.emptyIcon}><Icon name={query ? 'film-outline' : 'search-outline'} size={30} color={COLORS.cyan} /></View>
+            <Text style={styles.sectionKicker}>{query ? 'No matches yet' : 'Open the catalog'}</Text>
+            <Text style={styles.emptyTitle}>{query ? 'Nothing in this signal.' : 'What are you in the mood for?'}</Text>
+            <Text style={styles.emptyCopy}>{query ? 'Try another title, spelling, or platform.' : 'Search by title, series, or platform and we’ll bring the screening room to you.'}</Text>
+          </View>
+        )}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -366,22 +373,24 @@ function BrowseScreen({ genres, onGenre }: { genres: Record<number, string>; onG
   const genreEntries = Object.entries(genres);
 
   return (
-    <ScrollView contentContainerStyle={styles.pageContent}>
+    <View style={styles.screenFill}>
       <ScreenHeading eyebrow="Browse the signal" title="Pick a feeling." detail="Jump into a world by genre." />
-      <View style={styles.genreGrid}>
-        {genreEntries.map(([id, name]) => (
-          <Pressable
-            key={id}
-            onPress={() => onGenre(Number(id))}
-            style={({ pressed }) => [styles.genreChip, pressed && styles.genreChipPressed]}
-          >
-            <Text style={styles.genreChipText}>{name}</Text>
-            <Icon name="arrow-forward" size={16} color={COLORS.cyan} />
-          </Pressable>
-        ))}
-      </View>
-      {!genreEntries.length && <ActivityIndicator color={COLORS.lime} style={styles.loadingIndicator} />}
-    </ScrollView>
+      <ScrollView style={styles.screenFill} contentContainerStyle={styles.browseContent} showsVerticalScrollIndicator={false}>
+        <View style={styles.genreGrid}>
+          {genreEntries.map(([id, name]) => (
+            <Pressable
+              key={id}
+              onPress={() => onGenre(Number(id))}
+              style={({ pressed }) => [styles.genreChip, pressed && styles.genreChipPressed]}
+            >
+              <Text style={styles.genreChipText}>{name}</Text>
+              <Icon name="arrow-forward" size={16} color={COLORS.cyan} />
+            </Pressable>
+          ))}
+        </View>
+        {!genreEntries.length && <ActivityIndicator color={COLORS.lime} style={styles.loadingIndicator} />}
+      </ScrollView>
+    </View>
   );
 }
 
@@ -833,40 +842,45 @@ function CinemaApp() {
   };
 
   const renderHome = () => (
-    <ScrollView
-      contentContainerStyle={styles.homeContent}
-      refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadCatalog(true)} tintColor={COLORS.lime} />}
-      showsVerticalScrollIndicator={false}
-    >
+    <View style={styles.screenFill}>
       <Header onSearch={() => setActiveTab('search')} onBrowse={() => setActiveTab('browse')} />
-      <Featured movie={featured} onPlay={() => featured && playMovie(featured)} onDetails={() => featured && openMovie(featured)} />
-      <View style={styles.introBlock}>
-        <Text style={styles.introIndex}>01</Text>
-        <View style={styles.introCopy}>
-          <Text style={styles.sectionKicker}>A living catalog</Text>
-          <Text style={styles.introTitle}>Pick a feeling. <Text style={styles.introAccent}>Find a world.</Text></Text>
-          <Text style={styles.introDetail}>Freshly tuned from the movie universe. Move through the shelves and let the next story find you.</Text>
+      <ScrollView
+        style={styles.screenFill}
+        contentContainerStyle={styles.homeContent}
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => void loadCatalog(true)} tintColor={COLORS.lime} />}
+        showsVerticalScrollIndicator={false}
+      >
+        <Featured movie={featured} onPlay={() => featured && playMovie(featured)} onDetails={() => featured && openMovie(featured)} />
+        <View style={styles.introBlock}>
+          <Text style={styles.introIndex}>01</Text>
+          <View style={styles.introCopy}>
+            <Text style={styles.sectionKicker}>A living catalog</Text>
+            <Text style={styles.introTitle}>Pick a feeling. <Text style={styles.introAccent}>Find a world.</Text></Text>
+            <Text style={styles.introDetail}>Freshly tuned from the movie universe. Move through the shelves and let the next story find you.</Text>
+          </View>
         </View>
-      </View>
-      {error ? <Text style={styles.errorText}>{error}</Text> : null}
-      <Shelf kicker="The main feature" title="Trending now" note="Most watched" movies={collections.trending} onPress={openMovie} />
-      <Shelf kicker="Fresh arrivals" title="New on the reel" note="Just added" movies={collections.latest} onPress={openMovie} />
-      <Shelf kicker="Long-form worlds" title="Series to disappear into" note="One more episode" movies={collections.tv} onPress={openMovie} />
-      <Shelf kicker="High velocity" title="Turn up the voltage" note="Action" movies={collections.action} onPress={openMovie} />
-      <Shelf kicker="Beyond reality" title="Animated dimensions" note="No ceiling" movies={collections.anime} onPress={openMovie} />
-    </ScrollView>
+        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        <Shelf kicker="The main feature" title="Trending now" note="Most watched" movies={collections.trending} onPress={openMovie} />
+        <Shelf kicker="Fresh arrivals" title="New on the reel" note="Just added" movies={collections.latest} onPress={openMovie} />
+        <Shelf kicker="Long-form worlds" title="Series to disappear into" note="One more episode" movies={collections.tv} onPress={openMovie} />
+        <Shelf kicker="High velocity" title="Turn up the voltage" note="Action" movies={collections.action} onPress={openMovie} />
+        <Shelf kicker="Beyond reality" title="Animated dimensions" note="No ceiling" movies={collections.anime} onPress={openMovie} />
+      </ScrollView>
+    </View>
   );
 
   const renderCatalog = (kind: 'films' | 'series') => (
-    <ScrollView contentContainerStyle={styles.pageContent} showsVerticalScrollIndicator={false}>
+    <View style={styles.screenFill}>
       <Header onSearch={() => setActiveTab('search')} onBrowse={() => setActiveTab('browse')} />
       <ScreenHeading
         eyebrow={kind === 'films' ? 'The main feature' : 'Long-form worlds'}
         title={kind === 'films' ? 'Films' : 'Series'}
         detail={kind === 'films' ? 'A full-screen collection for the night.' : 'Stories with room to stay awhile.'}
       />
-      <CatalogGrid movies={kind === 'films' ? filmCatalog : seriesCatalog} onPress={openMovie} />
-    </ScrollView>
+      <ScrollView style={styles.screenFill} contentContainerStyle={styles.catalogContent} showsVerticalScrollIndicator={false}>
+        <CatalogGrid movies={kind === 'films' ? filmCatalog : seriesCatalog} onPress={openMovie} />
+      </ScrollView>
+    </View>
   );
 
   const renderSearch = () => (
@@ -958,8 +972,11 @@ const styles = StyleSheet.create({
   qualityChipTextActive: { color: COLORS.ink },
   playerHint: { color: COLORS.muted, fontSize: 12, lineHeight: 18 },
   screenFill: { flex: 1 },
-  homeContent: { paddingBottom: 122 },
-  pageContent: { paddingHorizontal: 18, paddingBottom: 126 },
+  homeContent: { paddingBottom: 36 },
+  catalogContent: { paddingHorizontal: 18, paddingBottom: 36 },
+  searchScreen: { flex: 1, paddingHorizontal: 18 },
+  searchResultsContent: { flexGrow: 1, paddingBottom: 36 },
+  browseContent: { paddingHorizontal: 18, paddingBottom: 36 },
   header: { minHeight: 64, paddingHorizontal: 18, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   headerActions: { flexDirection: 'row', gap: 9 },
   brand: { flexDirection: 'row', alignItems: 'center', gap: 9 },
@@ -1021,7 +1038,7 @@ const styles = StyleSheet.create({
   posterPlay: { position: 'absolute', bottom: 9, left: 9, width: 30, height: 30, borderRadius: 15, alignItems: 'center', justifyContent: 'center', backgroundColor: COLORS.lime },
   posterTitle: { color: '#e2e6ff', fontSize: 13, fontWeight: '800', marginTop: 9 },
   posterMeta: { color: COLORS.muted, fontSize: 11, marginTop: 4 },
-  screenHeading: { paddingTop: 22, paddingBottom: 23 },
+  screenHeading: { paddingHorizontal: 18, paddingTop: 22, paddingBottom: 23 },
   screenTitle: { color: COLORS.paper, fontSize: 40, lineHeight: 41, fontWeight: '900', letterSpacing: -2, marginTop: 9 },
   screenDetail: { color: COLORS.muted, fontSize: 14, lineHeight: 20, marginTop: 10 },
   catalogGrid: { gap: 18 },
@@ -1038,7 +1055,7 @@ const styles = StyleSheet.create({
   genreChipPressed: { borderColor: COLORS.lime, backgroundColor: 'rgba(215,255,97,0.12)' },
   genreChipText: { color: COLORS.paper, fontSize: 15, fontWeight: '800' },
   loadingIndicator: { marginTop: 45 },
-  bottomNav: { position: 'absolute', zIndex: 20, left: 10, right: 10, bottom: 9, minHeight: 64, borderRadius: 21, paddingTop: 6, paddingHorizontal: 6, flexDirection: 'row', backgroundColor: 'rgba(10,14,27,0.94)', borderWidth: 1, borderColor: COLORS.line, shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 25, elevation: 14 },
+  bottomNav: { minHeight: 64, marginHorizontal: 10, marginTop: 8, borderRadius: 21, paddingTop: 6, paddingHorizontal: 6, flexDirection: 'row', backgroundColor: 'rgba(10,14,27,0.94)', borderWidth: 1, borderColor: COLORS.line, shadowColor: '#000', shadowOpacity: 0.42, shadowRadius: 25, elevation: 14 },
   bottomTab: { flex: 1, minHeight: 48, borderRadius: 15, alignItems: 'center', justifyContent: 'center', gap: 3 },
   bottomTabActive: { backgroundColor: COLORS.lime },
   bottomTabText: { color: COLORS.muted, fontSize: 10, fontWeight: '800' },
