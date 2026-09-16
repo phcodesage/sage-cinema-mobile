@@ -1,5 +1,6 @@
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { VideoView, useVideoPlayer } from 'expo-video';
 import { StatusBar } from 'expo-status-bar';
 import { useEffect, useMemo, useState } from 'react';
 import {
@@ -31,8 +32,25 @@ type Movie = {
   backdrop_path?: string | null;
   release_date?: string;
   first_air_date?: string;
+  number_of_seasons?: number;
   vote_average?: number;
   media_type?: string;
+};
+
+type PlaybackSource = {
+  id: string;
+  label: string;
+  quality: string;
+  type: 'hls' | 'mp4' | 'dash' | 'unknown';
+  playbackUrl: string;
+  provider: string;
+};
+
+type PlaybackSubtitle = {
+  id: string;
+  lang: string;
+  language: string;
+  url: string;
 };
 
 type Collections = {
@@ -49,6 +67,7 @@ type Tab = 'home' | 'films' | 'series' | 'search' | 'browse';
 const API_URL = (process.env.EXPO_PUBLIC_API_URL || 'https://sage-cinema-nu.vercel.app').replace(/\/$/, '');
 const POSTER_URL = 'https://image.tmdb.org/t/p/w500';
 const BACKDROP_URL = 'https://image.tmdb.org/t/p/w1280';
+const PLAYBACK_SERVERS = ['cdn', 'vsrc', 'm4uhd', 'superflix'];
 const EMPTY_COLLECTIONS: Collections = {
   trending: [],
   latest: [],
@@ -63,11 +82,9 @@ const yearOf = (movie: Movie) => (movie.release_date || movie.first_air_date || 
 const isSeries = (movie: Movie) => movie.media_type === 'tv' || Boolean(movie.first_air_date);
 const typeLabel = (movie: Movie) => (isSeries(movie) ? 'Series' : 'Film');
 
-function movieSlug(movie: Movie) {
-  return titleOf(movie)
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, '-')
-    .replace(/(^-|-$)/g, '');
+function resolveApiUrl(value: string) {
+  if (/^https?:\/\//i.test(value)) return value;
+  return `${API_URL}${value.startsWith('/') ? '' : '/'}${value}`;
 }
 
 function rating(movie: Movie) {
@@ -435,11 +452,297 @@ function BottomNav({ activeTab, onChange }: { activeTab: Tab; onChange: (tab: Ta
   );
 }
 
+function normalizePlaybackSource(value: unknown): PlaybackSource | null {
+  if (!value || typeof value !== 'object') return null;
+  const source = value as Record<string, unknown>;
+  const type = source.type;
+  const playbackUrl = source.playbackUrl;
+  if (
+    typeof source.id !== 'string' ||
+    typeof source.label !== 'string' ||
+    typeof source.quality !== 'string' ||
+    typeof playbackUrl !== 'string' ||
+    typeof source.provider !== 'string' ||
+    (type !== 'hls' && type !== 'mp4' && type !== 'dash')
+  ) {
+    return null;
+  }
+
+  return {
+    id: source.id,
+    label: source.label,
+    quality: source.quality,
+    type,
+    playbackUrl,
+    provider: source.provider,
+  };
+}
+
+function normalizePlaybackSubtitle(value: unknown): PlaybackSubtitle | null {
+  if (!value || typeof value !== 'object') return null;
+  const subtitle = value as Record<string, unknown>;
+  if (
+    typeof subtitle.id !== 'string' ||
+    typeof subtitle.lang !== 'string' ||
+    typeof subtitle.language !== 'string' ||
+    typeof subtitle.url !== 'string'
+  ) {
+    return null;
+  }
+
+  return {
+    id: subtitle.id,
+    lang: subtitle.lang,
+    language: subtitle.language,
+    url: subtitle.url,
+  };
+}
+
+function NativeVideoSurface({
+  movie,
+  source,
+  onReady,
+  onError,
+}: {
+  movie: Movie;
+  source: PlaybackSource;
+  onReady: () => void;
+  onError: (message: string) => void;
+}) {
+  const nativeSource = useMemo(
+    () => ({
+      uri: resolveApiUrl(source.playbackUrl),
+      contentType: source.type === 'hls' ? 'hls' as const : source.type === 'dash' ? 'dash' as const : 'progressive' as const,
+      metadata: {
+        title: titleOf(movie),
+        artist: 'SAGE CINEMA',
+        artwork: movie.poster_path ? `${POSTER_URL}${movie.poster_path}` : undefined,
+      },
+    }),
+    [movie, source],
+  );
+  const player = useVideoPlayer(nativeSource, (videoPlayer) => {
+    videoPlayer.keepScreenOnWhilePlaying = true;
+    videoPlayer.bufferOptions = {
+      preferredForwardBufferDuration: 15,
+      minBufferForPlayback: 2,
+      maxBufferBytes: 16 * 1024 * 1024,
+      prioritizeTimeOverSizeThreshold: false,
+    };
+    videoPlayer.play();
+  });
+
+  useEffect(() => {
+    const statusSubscription = player.addListener('statusChange', ({ status, error }) => {
+      if (status === 'error') {
+        onError(error?.message || 'The native player could not load this stream.');
+      }
+    });
+    return () => statusSubscription.remove();
+  }, [onError, player]);
+
+  return (
+    <VideoView
+      style={styles.videoSurface}
+      player={player}
+      nativeControls
+      contentFit="contain"
+      surfaceType="surfaceView"
+      allowsPictureInPicture={false}
+      fullscreenOptions={{ enable: true, orientation: 'landscape' }}
+      buttonOptions={{ showSettings: true, showSeekForward: true, showSeekBackward: true }}
+      onFirstFrameRender={onReady}
+    />
+  );
+}
+
+function NativePlayerScreen({ movie, onClose }: { movie: Movie; onClose: () => void }) {
+  const [server, setServer] = useState(PLAYBACK_SERVERS[0]);
+  const [requestVersion, setRequestVersion] = useState(0);
+  const [sources, setSources] = useState<PlaybackSource[]>([]);
+  const [subtitles, setSubtitles] = useState<PlaybackSubtitle[]>([]);
+  const [selectedSourceId, setSelectedSourceId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [sourceError, setSourceError] = useState('');
+  const [playerError, setPlayerError] = useState('');
+  const [videoReady, setVideoReady] = useState(false);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 20000);
+    const type = isSeries(movie) ? 'tv' : 'movie';
+    const params = [
+      ['player', 'unified'],
+      ['server', server],
+      ['lang', 'en'],
+      ['title', titleOf(movie)],
+      ['year', yearOf(movie)],
+      ...(isSeries(movie) ? [['season', '1'], ['episode', '1']] : []),
+      ...(movie.number_of_seasons ? [['totalSeasons', String(movie.number_of_seasons)]] : []),
+    ]
+      .filter(([, value]) => value && value !== '—')
+      .map(([key, value]) => `${key}=${encodeURIComponent(value)}`)
+      .join('&');
+
+    setLoading(true);
+    setSourceError('');
+    setPlayerError('');
+    setSources([]);
+    setSubtitles([]);
+    setSelectedSourceId('');
+    setVideoReady(false);
+
+    fetch(`${API_URL}/api/video-sources/${type}/${movie.id}?${params}`, { signal: controller.signal })
+      .then(async (response) => {
+        const payload = await response.json() as { player?: string; sources?: unknown[]; subtitles?: unknown[]; error?: string };
+        if (!response.ok) throw new Error(payload.error || 'The source service returned an error.');
+        return payload;
+      })
+      .then((payload) => {
+        if (payload.player && payload.player !== 'unified') {
+          throw new Error('The selected source is not compatible with the native player.');
+        }
+        const nextSources = (payload.sources || [])
+          .map(normalizePlaybackSource)
+          .filter((source): source is PlaybackSource => Boolean(source));
+        if (!nextSources.length) throw new Error('No playable native streams were found for this title.');
+        const nextSubtitles = (payload.subtitles || [])
+          .map(normalizePlaybackSubtitle)
+          .filter((subtitle): subtitle is PlaybackSubtitle => Boolean(subtitle));
+        setSources(nextSources);
+        setSubtitles(nextSubtitles);
+        setSelectedSourceId(nextSources[0].id);
+      })
+      .catch((requestError: unknown) => {
+        if (controller.signal.aborted) {
+          setSourceError('The source request timed out. Check your connection and try again.');
+        } else {
+          setSourceError(requestError instanceof Error ? requestError.message : 'The source service is unavailable.');
+        }
+      })
+      .finally(() => {
+        clearTimeout(timeout);
+        setLoading(false);
+      });
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [movie, requestVersion, server]);
+
+  const selectedSource = sources.find((source) => source.id === selectedSourceId) || sources[0];
+  const nextServer = PLAYBACK_SERVERS[(PLAYBACK_SERVERS.indexOf(server) + 1) % PLAYBACK_SERVERS.length];
+  const displayError = playerError || sourceError;
+
+  return (
+    <View style={styles.playerScreen}>
+      <View style={styles.playerHeader}>
+        <Pressable onPress={onClose} style={styles.playerBack} accessibilityLabel="Close native player">
+          <Icon name="arrow-back" size={21} />
+        </Pressable>
+        <View style={styles.playerHeaderCopy}>
+          <Text style={styles.sectionKicker}>Native screening room</Text>
+          <Text numberOfLines={1} style={styles.playerTitle}>{titleOf(movie)}</Text>
+        </View>
+        <Text style={styles.playerHeaderMeta}>{isSeries(movie) ? 'S1 · E1' : yearOf(movie)}</Text>
+      </View>
+
+      {loading ? (
+        <View style={styles.playerLoading}>
+          <ActivityIndicator color={COLORS.lime} size="large" />
+          <Text style={styles.playerLoadingTitle}>Finding a native stream</Text>
+          <Text style={styles.mutedText}>Connecting to the {server} source pool…</Text>
+        </View>
+      ) : displayError && !selectedSource ? (
+        <View style={styles.playerErrorState}>
+          <View style={styles.emptyIcon}><Icon name="warning-outline" size={29} color={COLORS.pink} /></View>
+          <Text style={styles.sectionKicker}>Playback signal lost</Text>
+          <Text style={styles.playerErrorTitle}>{displayError}</Text>
+          <Text style={styles.playerErrorCopy}>Try the request again or switch to another source pool.</Text>
+          <View style={styles.playerErrorActions}>
+            <ActionButton label="Retry" icon="refresh" onPress={() => setRequestVersion((value) => value + 1)} />
+            <ActionButton label={`Try ${nextServer}`} icon="swap-horizontal" onPress={() => setServer(nextServer)} secondary />
+          </View>
+        </View>
+      ) : selectedSource ? (
+        <>
+          <View style={styles.videoStage}>
+            {playerError ? (
+              <View style={styles.videoErrorState}>
+                <Icon name="warning-outline" size={28} color={COLORS.pink} />
+                <Text style={styles.videoErrorTitle}>This stream stopped loading.</Text>
+                <Text style={styles.videoErrorCopy}>{playerError}</Text>
+                <Pressable
+                  onPress={() => {
+                    setPlayerError('');
+                    setVideoReady(false);
+                    setRequestVersion((value) => value + 1);
+                  }}
+                  style={styles.playerRetryButton}
+                >
+                  <Icon name="refresh" size={17} color={COLORS.ink} />
+                  <Text style={styles.playerRetryText}>Retry stream</Text>
+                </Pressable>
+              </View>
+            ) : (
+              <>
+                <NativeVideoSurface
+                  key={`${selectedSource.id}-${requestVersion}`}
+                  movie={movie}
+                  source={selectedSource}
+                  onReady={() => setVideoReady(true)}
+                  onError={setPlayerError}
+                />
+                {!videoReady && (
+                  <View pointerEvents="none" style={styles.videoLoadingOverlay}>
+                    <ActivityIndicator color={COLORS.lime} />
+                    <Text style={styles.videoLoadingText}>Buffering native playback…</Text>
+                  </View>
+                )}
+              </>
+            )}
+          </View>
+          <View style={styles.playerBody}>
+            <View style={styles.playerBodyHeading}>
+              <View>
+                <Text style={styles.sectionKicker}>Stream quality</Text>
+                <Text style={styles.playerProvider}>{selectedSource.provider}</Text>
+              </View>
+              <Text style={styles.nativeBadge}>NATIVE</Text>
+            </View>
+            <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.qualityTrack}>
+              {sources.map((source) => (
+                <Pressable
+                  key={source.id}
+                  onPress={() => {
+                    setSelectedSourceId(source.id);
+                    setPlayerError('');
+                    setVideoReady(false);
+                  }}
+                  style={[styles.qualityChip, source.id === selectedSource.id && styles.qualityChipActive]}
+                >
+                  <Icon name="play-circle-outline" size={16} color={source.id === selectedSource.id ? COLORS.ink : COLORS.cyan} />
+                  <Text style={[styles.qualityChipText, source.id === selectedSource.id && styles.qualityChipTextActive]}>{source.quality}</Text>
+                </Pressable>
+              ))}
+            </ScrollView>
+            <Text style={styles.playerHint}>
+              Native controls provide play, seek, fullscreen, and stream settings. {subtitles.length ? `${subtitles.length} subtitle track${subtitles.length === 1 ? '' : 's'} returned by the API.` : 'No external subtitle tracks were returned for this title.'}
+            </Text>
+          </View>
+        </>
+      ) : null}
+    </View>
+  );
+}
+
 function CinemaApp() {
   const [collections, setCollections] = useState<Collections>(EMPTY_COLLECTIONS);
   const [genres, setGenres] = useState<Record<number, string>>({});
   const [activeTab, setActiveTab] = useState<Tab>('home');
   const [selectedMovie, setSelectedMovie] = useState<Movie | null>(null);
+  const [playerMovie, setPlayerMovie] = useState<Movie | null>(null);
   const [query, setQuery] = useState('');
   const [searchResults, setSearchResults] = useState<Movie[]>([]);
   const [searching, setSearching] = useState(false);
@@ -521,8 +824,8 @@ function CinemaApp() {
 
   const openMovie = (movie: Movie) => setSelectedMovie(movie);
   const playMovie = (movie: Movie) => {
-    const url = `${API_URL}/movie/${movie.id}/${isSeries(movie) ? 'tv' : 'movie'}-${movieSlug(movie)}`;
-    void Linking.openURL(url);
+    setSelectedMovie(null);
+    setPlayerMovie(movie);
   };
 
   const onGenre = (id: number) => {
@@ -581,9 +884,11 @@ function CinemaApp() {
   );
 
   return (
-    <SafeAreaView style={styles.safe} edges={['top']}>
+    <SafeAreaView style={styles.safe} edges={playerMovie ? ['top', 'bottom'] : ['top']}>
       <StatusBar style="light" />
-      {loading ? (
+      {playerMovie ? (
+        <NativePlayerScreen movie={playerMovie} onClose={() => setPlayerMovie(null)} />
+      ) : loading ? (
         <View style={styles.loadingScreen}>
           <View style={styles.loadingMark}><Brand /></View>
           <ActivityIndicator color={COLORS.lime} size="small" />
@@ -591,8 +896,8 @@ function CinemaApp() {
           <Text style={styles.mutedText}>Loading the living catalog</Text>
         </View>
       ) : activeTab === 'home' ? renderHome() : activeTab === 'films' ? renderCatalog('films') : activeTab === 'series' ? renderCatalog('series') : activeTab === 'search' ? renderSearch() : renderBrowse()}
-      <BottomNav activeTab={activeTab} onChange={setActiveTab} />
-      <MovieSheet movie={selectedMovie} onClose={() => setSelectedMovie(null)} onPlay={playMovie} />
+      {!playerMovie && <BottomNav activeTab={activeTab} onChange={setActiveTab} />}
+      {!playerMovie && <MovieSheet movie={selectedMovie} onClose={() => setSelectedMovie(null)} onPlay={playMovie} />}
     </SafeAreaView>
   );
 }
@@ -621,6 +926,37 @@ const COLORS = {
 
 const styles = StyleSheet.create({
   safe: { flex: 1, backgroundColor: COLORS.ink },
+  playerScreen: { flex: 1, backgroundColor: COLORS.ink },
+  playerHeader: { minHeight: 70, paddingHorizontal: 14, flexDirection: 'row', alignItems: 'center', gap: 11 },
+  playerBack: { width: 42, height: 42, borderRadius: 13, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panel, alignItems: 'center', justifyContent: 'center' },
+  playerHeaderCopy: { flex: 1 },
+  playerTitle: { color: COLORS.paper, fontSize: 17, fontWeight: '900', marginTop: 4 },
+  playerHeaderMeta: { color: COLORS.cyan, fontSize: 11, fontWeight: '900', letterSpacing: 0.6 },
+  playerLoading: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 24, gap: 10 },
+  playerLoadingTitle: { color: COLORS.paper, fontSize: 19, fontWeight: '900', marginTop: 7 },
+  playerErrorState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 28, gap: 9 },
+  playerErrorTitle: { color: COLORS.paper, fontSize: 20, lineHeight: 24, fontWeight: '900', textAlign: 'center', marginTop: 2 },
+  playerErrorCopy: { color: COLORS.muted, fontSize: 13, lineHeight: 19, textAlign: 'center', maxWidth: 320 },
+  playerErrorActions: { flexDirection: 'row', gap: 9, marginTop: 12 },
+  videoStage: { width: '100%', aspectRatio: 16 / 9, backgroundColor: '#000', overflow: 'hidden' },
+  videoSurface: { flex: 1, width: '100%' },
+  videoLoadingOverlay: { position: 'absolute', top: 0, right: 0, bottom: 0, left: 0, alignItems: 'center', justifyContent: 'center', gap: 10, backgroundColor: 'rgba(0,0,0,0.48)' },
+  videoLoadingText: { color: COLORS.paper, fontSize: 12, fontWeight: '700' },
+  videoErrorState: { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 22, gap: 8 },
+  videoErrorTitle: { color: COLORS.paper, fontSize: 16, fontWeight: '900', textAlign: 'center', marginTop: 3 },
+  videoErrorCopy: { color: COLORS.muted, fontSize: 11, lineHeight: 16, textAlign: 'center', maxWidth: 310 },
+  playerRetryButton: { minHeight: 40, paddingHorizontal: 14, borderRadius: 13, flexDirection: 'row', alignItems: 'center', gap: 7, backgroundColor: COLORS.lime, marginTop: 8 },
+  playerRetryText: { color: COLORS.ink, fontSize: 12, fontWeight: '900' },
+  playerBody: { flex: 1, paddingHorizontal: 18, paddingTop: 20 },
+  playerBodyHeading: { flexDirection: 'row', alignItems: 'flex-start', justifyContent: 'space-between' },
+  playerProvider: { color: COLORS.paper, fontSize: 14, fontWeight: '800', marginTop: 5 },
+  nativeBadge: { color: COLORS.ink, backgroundColor: COLORS.lime, borderRadius: 5, paddingHorizontal: 7, paddingVertical: 5, fontSize: 9, fontWeight: '900', letterSpacing: 0.8 },
+  qualityTrack: { gap: 8, paddingVertical: 15, alignItems: 'flex-start' },
+  qualityChip: { minHeight: 39, paddingHorizontal: 12, borderRadius: 12, borderWidth: 1, borderColor: COLORS.line, backgroundColor: COLORS.panel, flexDirection: 'row', alignItems: 'center', gap: 6 },
+  qualityChipActive: { borderColor: COLORS.lime, backgroundColor: COLORS.lime },
+  qualityChipText: { color: COLORS.paper, fontSize: 12, fontWeight: '900' },
+  qualityChipTextActive: { color: COLORS.ink },
+  playerHint: { color: COLORS.muted, fontSize: 12, lineHeight: 18 },
   screenFill: { flex: 1 },
   homeContent: { paddingBottom: 122 },
   pageContent: { paddingHorizontal: 18, paddingBottom: 126 },

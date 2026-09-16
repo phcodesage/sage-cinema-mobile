@@ -37,4 +37,4 @@ cd android
 ./gradlew clean
 ```
 
-The app’s Play action opens the existing Sage Cinema player URL so the current streaming resolver and playback stack remain the source of truth.
+The app’s Play action requests the existing unified video-source API and plays the returned HLS/MP4/DASH stream with Expo Video’s native Android Media3 player. The player includes native controls, landscape fullscreen, quality switching, source retry, and bounded buffering. TV playback currently starts at season 1, episode 1; external subtitle rendering and a season/episode picker are planned follow-ups.

@@ -31,6 +31,12 @@
           "image": "./assets/icon.png",
           "imageWidth": 96
         }
+      ],
+      [
+        "expo-video",
+        {
+          "supportsPictureInPicture": true
+        }
       ]
     ]
   }
